@@ -1,0 +1,38 @@
+
+{% extends "base.html" %}
+
+{% block content %}
+<section class="form-card">
+    <h1>{{ page_title }}</h1>
+    <p>Enter the student information below.</p>
+
+    <form method="POST">
+        <label for="name">Full Name</label>
+        <input id="name" name="name" type="text"
+               maxlength="100" required
+               value="{{ student.get('name', '') }}">
+
+        <label for="email">Email Address</label>
+        <input id="email" name="email" type="email"
+               maxlength="254" required
+               value="{{ student.get('email', '') }}">
+
+        <label for="age">Age</label>
+        <input id="age" name="age" type="number"
+               min="1" max="120" required
+               value="{{ student.get('age', '') }}">
+
+        <label for="course">Course</label>
+        <input id="course" name="course" type="text"
+               maxlength="100" required
+               placeholder="e.g. BCA, B.Sc Computer Science"
+               value="{{ student.get('course', '') }}">
+
+        <div class="form-actions">
+            <button class="btn" type="submit">Save Student</button>
+            <a class="btn secondary"
+               href="{{ url_for('index') }}">Cancel</a>
+        </div>
+    </form>
+</section>
+{% endblock %}

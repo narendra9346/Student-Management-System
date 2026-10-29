@@ -1,120 +1,220 @@
 
-from flask import Flask, render_template, request, redirect, url_for
+import os
 import sqlite3
+from pathlib import Path
+
+from flask import (
+    Flask, render_template, request,
+    redirect, url_for, flash, abort
+)
 
 app = Flask(__name__)
 
-# Connect to the database
+# Use an environment variable for the secret key in production.
+app.secret_key = os.environ.get(
+    "SECRET_KEY", "dev-key-change-before-deployment"
+)
+
+BASE_DIR = Path(__file__).resolve().parent
+DATABASE = BASE_DIR / "students.db"
+
+
+# Connect to the SQLite database
 def get_db():
-    conn = sqlite3.connect("students.db")
-    conn.row_factory = sqlite3.Row
-    return conn
+    connection = sqlite3.connect(DATABASE)
+    connection.row_factory = sqlite3.Row
+    return connection
 
-# Create the table
-def create_table():
-    conn = get_db()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS students (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT NOT NULL,
-            course TEXT NOT NULL,
-            age INTEGER NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
 
-# Home page: display students and add students
-@app.route("/", methods=["GET", "POST"])
+# Create the students table automatically
+def init_db():
+    with get_db() as db:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS students (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                age INTEGER NOT NULL CHECK(age BETWEEN 1 AND 120),
+                course TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+
+# Dashboard and student search
+@app.route("/")
 def index():
-    conn = get_db()
+    search = request.args.get("q", "").strip()
 
+    with get_db() as db:
+        total = db.execute(
+            "SELECT COUNT(*) FROM students"
+        ).fetchone()[0]
+
+        if search:
+            pattern = f"%{search}%"
+            students = db.execute("""
+                SELECT * FROM students
+                WHERE name LIKE ?
+                   OR email LIKE ?
+                   OR course LIKE ?
+                ORDER BY id DESC
+            """, (pattern, pattern, pattern)).fetchall()
+        else:
+            students = db.execute("""
+                SELECT * FROM students
+                ORDER BY id DESC
+            """).fetchall()
+
+    return render_template(
+        "index.html",
+        students=students,
+        total=total,
+        search=search
+    )
+
+
+# Validate student form data
+def get_student_form():
+    name = request.form.get("name", "").strip()
+    email = request.form.get("email", "").strip().lower()
+    age_text = request.form.get("age", "").strip()
+    course = request.form.get("course", "").strip()
+
+    if not name or not email or not age_text or not course:
+        return None, "All fields are required."
+
+    if len(name) > 100 or len(email) > 254 or len(course) > 100:
+        return None, "Please shorten the entered information."
+
+    if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+        return None, "Please enter a valid email address."
+
+    try:
+        age = int(age_text)
+    except ValueError:
+        return None, "Age must be a whole number."
+
+    if not 1 <= age <= 120:
+        return None, "Age must be between 1 and 120."
+
+    return {
+        "name": name,
+        "email": email,
+        "age": age,
+        "course": course
+    }, None
+
+
+# Add a new student
+@app.route("/add", methods=["GET", "POST"])
+def add_student():
     if request.method == "POST":
-        name = request.form["name"].strip()
-        email = request.form["email"].strip()
-        course = request.form["course"].strip()
-        age = request.form["age"]
+        student, error = get_student_form()
 
-        if not name or not email or not course:
-            conn.close()
-            return "All fields are required.", 400
+        if error:
+            flash(error, "error")
+            return render_template(
+                "student_form.html",
+                student=request.form,
+                page_title="Add Student"
+            )
 
         try:
-            age = int(age)
-            if age < 1 or age > 120:
-                raise ValueError
+            with get_db() as db:
+                db.execute("""
+                    INSERT INTO students (name, email, age, course)
+                    VALUES (?, ?, ?, ?)
+                """, (
+                    student["name"],
+                    student["email"],
+                    student["age"],
+                    student["course"]
+                ))
+            flash("Student added successfully!", "success")
+            return redirect(url_for("index"))
 
-            conn.execute(
-                "INSERT INTO students (name, email, course, age) "
-                "VALUES (?, ?, ?, ?)",
-                (name, email, course, age)
-            )
-            conn.commit()
-        except ValueError:
-            conn.close()
-            return "Enter a valid age between 1 and 120.", 400
+        except sqlite3.IntegrityError:
+            flash("This email address is already registered.", "error")
 
-        conn.close()
-        return redirect(url_for("index"))
+    return render_template(
+        "student_form.html",
+        student={},
+        page_title="Add Student"
+    )
 
-    students = conn.execute(
-        "SELECT * FROM students ORDER BY id DESC"
-    ).fetchall()
-    conn.close()
 
-    return render_template("index.html", students=students)
-
-# Update a student
-@app.route("/edit/<int:id>", methods=["GET", "POST"])
-def edit(id):
-    conn = get_db()
-
-    student = conn.execute(
-        "SELECT * FROM students WHERE id = ?", (id,)
-    ).fetchone()
+# Edit an existing student
+@app.route("/edit/<int:student_id>", methods=["GET", "POST"])
+def edit_student(student_id):
+    with get_db() as db:
+        student = db.execute(
+            "SELECT * FROM students WHERE id = ?",
+            (student_id,)
+        ).fetchone()
 
     if student is None:
-        conn.close()
-        return "Student not found.", 404
+        abort(404)
 
     if request.method == "POST":
-        name = request.form["name"].strip()
-        email = request.form["email"].strip()
-        course = request.form["course"].strip()
+        updated, error = get_student_form()
+
+        if error:
+            flash(error, "error")
+            return render_template(
+                "student_form.html",
+                student=request.form,
+                page_title="Edit Student"
+            )
 
         try:
-            age = int(request.form["age"])
-            if not name or not email or not course:
-                raise ValueError
-            if age < 1 or age > 120:
-                raise ValueError
-        except ValueError:
-            conn.close()
-            return "Enter valid student details.", 400
+            with get_db() as db:
+                db.execute("""
+                    UPDATE students
+                    SET name = ?, email = ?, age = ?, course = ?
+                    WHERE id = ?
+                """, (
+                    updated["name"],
+                    updated["email"],
+                    updated["age"],
+                    updated["course"],
+                    student_id
+                ))
+            flash("Student updated successfully!", "success")
+            return redirect(url_for("index"))
 
-        conn.execute("""
-            UPDATE students
-            SET name = ?, email = ?, course = ?, age = ?
-            WHERE id = ?
-        """, (name, email, course, age, id))
+        except sqlite3.IntegrityError:
+            flash("That email address belongs to another student.", "error")
+            return render_template(
+                "student_form.html",
+                student=request.form,
+                page_title="Edit Student"
+            )
 
-        conn.commit()
-        conn.close()
-        return redirect(url_for("index"))
+    return render_template(
+        "student_form.html",
+        student=student,
+        page_title="Edit Student"
+    )
 
-    conn.close()
-    return render_template("edit.html", student=student)
 
 # Delete a student
-@app.route("/delete/<int:id>", methods=["POST"])
-def delete(id):
-    conn = get_db()
-    conn.execute("DELETE FROM students WHERE id = ?", (id,))
-    conn.commit()
-    conn.close()
+@app.route("/delete/<int:student_id>", methods=["POST"])
+def delete_student(student_id):
+    with get_db() as db:
+        cursor = db.execute(
+            "DELETE FROM students WHERE id = ?",
+            (student_id,)
+        )
+
+        if cursor.rowcount == 0:
+            abort(404)
+
+    flash("Student deleted successfully.", "success")
     return redirect(url_for("index"))
 
+
+# Initialize the database and start the app
 if __name__ == "__main__":
-    create_table()
+    init_db()
     app.run(debug=True)
